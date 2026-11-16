@@ -1,50 +1,119 @@
-const runbooks = {
-  tag: [
-    ['GitHub → Actions → Run 1842', 'Open the build-and-push step. Confirm commit 8c40f17 and the published tag checkout-api:8c40f17.'],
-    ['AWS Console → Amazon ECR → Repositories → checkout-api', 'In us-east-1, find tag 8c40f17 and copy its image digest. Confirm the artifact belongs to the intended release and that release-1842 is absent.'],
-    ['GitHub → deployment configuration for production/checkout-api', 'Find the image field for the checkout-api container in the manifest or Helm values that your pipeline actually deploys. Replace the existing registry/repository:release-1842 with the same registry/repository@sha256:<digest copied from ECR>. Open a pull request and deploy through the normal release workflow. The sample does not specify a file path or digest.'],
-    ['EKS → production namespace → checkout-api deployment', 'From the intended cluster context, run the command below. Confirm the new pods are Ready, use the expected image digest, and pass the checkout smoke test before updating the customer.', 'kubectl -n production rollout status deployment/checkout-api --timeout=5m']
-  ],
-  role: [
-    ['GitHub → Actions → Run 1851', 'Open Configure AWS credentials. Confirm the role configured for the release, the AccessDenied message, and the workflow subject repo:alder/billing-api:ref:refs/heads/main.'],
-    ['AWS Console → IAM → Roles → release role → Trust relationships', 'After confirming that the new repository is authorized, update the GitHub OIDC subject in the matching trust statement. Preserve the other conditions and review the change in infrastructure code if it manages this role.', 'Before: repo:alder/legacy-billing:ref:refs/heads/main\nAfter:  repo:alder/billing-api:ref:refs/heads/main'],
-    ['GitHub → Actions → Run 1851 → Re-run jobs', 'After the approved trust change is applied, rerun the failed workflow. Confirm the credentials step succeeds and the billing-api:41f93ae image appears in ECR.'],
-    ['EKS → production namespace → billing-api deployment', 'Confirm the new release rolled out and the application passes its smoke test before updating the customer.', 'kubectl -n production rollout status deployment/billing-api --timeout=5m']
-  ],
-  patchpilot: [
-    ['OpenSCAP → scan results', 'Record the missing report as No result. Keep the incident open until the scan returns a report.'],
-    ['AWS Console → EC2 → Instances → database host → Status checks', 'Compare the first failed check with the scan start time. After the host is reachable, check available memory and swap, and review any retained host metrics for pressure at the time of the incident.', 'free -h\nswapon --show'],
-    ['PatchPilot → database host configuration and scan scheduling', 'If evidence supports memory pressure, review sizing, swap, and scan priority. The lab moved from 4 GB to 8 GB, added swap, and lowered scan CPU and I/O priority. Size other hosts for their workload.'],
-    ['Oracle health checks and OpenSCAP → verification', 'During an approved maintenance window, rerun the scan. Confirm the host stays reachable, Oracle remains healthy, and the scan produces a report.']
-  ],
-  recovery: [
-    ['Incident timeline → confirm the deletion', 'Confirm known customer IDs are missing and establish the DELETE commit time in UTC from available evidence. In the lab, the API stayed available while records were missing. Preserve the original database and coordinate write handling before cutover.'],
-    ['AWS Console → RDS → Databases → source DB → Actions → Restore to point in time', 'Choose a recoverable UTC time before the bad transaction and restore to a new instance. The lab chose one second before the DELETE committed. Check the recovery window and use the verified timestamp for this incident.'],
-    ['Restored database → validate and reconcile', 'Check known missing IDs, expected counts, and application reads. Compare legitimate writes made after the restore point and reconcile recoverable changes before cutover. Document any unrecovered data.'],
-    ['Application configuration → cut over and verify', 'Coordinate a write freeze and point the application to the validated instance through the approved release process. Verify reads and writes, retain the original instance for investigation, and record recovery duration and remaining data loss.']
-  ]
+const cases = window.GuidedCases;
+const {rankQueue, slaRank, slaStatus, RANK} = window.GuidedSLA;
+const {buildReport} = window.GuidedReport;
+
+const el = id => document.getElementById(id);
+const STORAGE_PREFIX = 'corporate-pet:';
+const PROGRESS_KEY = STORAGE_PREFIX + 'progress';
+
+let trial = null;   // investigation in progress
+let lastRun = null; // most recently solved investigation, for the report
+
+// ---------- storage ----------
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageSet(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const noteKey = (caseId, stepId) => STORAGE_PREFIX + caseId + ':' + stepId;
+
+// Notes used to be keyed by step position. Move them to step ids once so they
+// stay attached to the right step if a runbook is reordered.
+function migrateIndexedNotes() {
+  for (const c of cases) {
+    c.runbook.forEach((step, index) => {
+      const oldKey = noteKey(c.id, index);
+      const old = storageGet(oldKey);
+      if (old === null) return;
+      if (storageGet(noteKey(c.id, step.id)) === null) storageSet(noteKey(c.id, step.id), old);
+      storageSet(oldKey, '');
+    });
+  }
+}
+
+function loadProgress() {
+  try { return JSON.parse(storageGet(PROGRESS_KEY)) || {}; } catch { return {}; }
+}
+
+function recordSolve(run) {
+  const progress = loadProgress();
+  const seconds = Math.round((run.solvedAt - run.startedAt) / 1000);
+  const entry = progress[run.caseData.id];
+  if (entry) entry.completions += 1;
+  else progress[run.caseData.id] = {firstTry: run.wrongLabels.length === 0, seconds, completions: 1};
+  storageSet(PROGRESS_KEY, JSON.stringify(progress));
+}
+
+// ---------- progress panel ----------
+
+function renderProgress() {
+  const progress = loadProgress();
+  const solved = cases.filter(c => progress[c.id]);
+  el('stat-solved').textContent = solved.length + '/' + cases.length;
+  if (solved.length) {
+    const firstTry = solved.filter(c => progress[c.id].firstTry).length;
+    const avgSeconds = solved.reduce((sum, c) => sum + progress[c.id].seconds, 0) / solved.length;
+    el('stat-accuracy').textContent = Math.round(firstTry / solved.length * 100) + '%';
+    el('stat-time').textContent = Math.floor(avgSeconds / 60) + 'm ' + Math.round(avgSeconds % 60) + 's';
+  } else {
+    el('stat-accuracy').textContent = el('stat-time').textContent = '–';
+  }
+  el('solved-list').replaceChildren(...cases.map(c => {
+    const item = document.createElement('li');
+    const done = Boolean(progress[c.id]);
+    item.className = done ? 'done' : '';
+    item.textContent = c.id + (done ? ' ✓ solved' : ' · open');
+    return item;
+  }));
+  const selected = el('sample').value;
+  el('sample').replaceChildren(...cases.map((c, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = c.id + ' · ' + c.title + (progress[c.id] ? ' ✓' : '');
+    return option;
+  }));
+  if (selected) el('sample').value = selected;
+}
+
+el('reset-progress').onclick = () => {
+  if (!confirm('Clear solved cases and stats? Step notes are kept.')) return;
+  storageSet(PROGRESS_KEY, '');
+  renderProgress();
+  el('progress-status').textContent = 'Progress cleared. Step notes were kept.';
 };
 
-function renderRunbook({id, action}) {
+// ---------- investigation ----------
+
+function renderRunbook(caseData) {
   const list = el('solution-steps');
   list.replaceChildren();
-  for (const [index, [location, instruction, exactValue]] of runbooks[action].entries()) {
-    const step = document.createElement('li');
+  for (const step of caseData.runbook) {
+    const item = document.createElement('li');
     const heading = document.createElement('h3');
     const description = document.createElement('p');
-    heading.textContent = location;
-    description.textContent = instruction;
-    step.append(heading, description);
-    if (exactValue) {
+    heading.textContent = step.where;
+    description.textContent = step.do;
+    item.append(heading, description);
+    if (step.code) {
       const code = document.createElement('code');
-      code.textContent = exactValue;
-      step.append(code);
+      code.textContent = step.code;
+      item.append(code);
     }
     const label = document.createElement('label');
     const note = document.createElement('textarea');
     const status = document.createElement('small');
-    const noteId = 'step-note-' + index;
-    const storageKey = 'corporate-pet:' + id + ':' + index;
+    const noteId = 'step-note-' + step.id;
+    const key = noteKey(caseData.id, step.id);
     label.htmlFor = noteId;
     label.textContent = 'What I see instead';
     note.id = noteId;
@@ -52,114 +121,62 @@ function renderRunbook({id, action}) {
     note.placeholder = 'Describe the menu, screen, or error you see.';
     note.setAttribute('aria-describedby', noteId + '-status');
     status.id = noteId + '-status';
-    try {
-      note.value = localStorage.getItem(storageKey) || '';
-    } catch {
-      status.textContent = 'Browser storage is unavailable.';
-    }
+    note.value = storageGet(key) || '';
     note.addEventListener('input', () => {
-      try {
-        if (note.value) localStorage.setItem(storageKey, note.value);
-        else localStorage.removeItem(storageKey);
-        status.textContent = note.value ? 'Saved in this browser.' : '';
-      } catch {
-        status.textContent = 'This note could not be saved.';
-      }
+      if (storageSet(key, note.value)) status.textContent = note.value ? 'Saved in this browser.' : '';
+      else status.textContent = 'This note could not be saved.';
     });
-    step.append(label, note, status);
-    list.append(step);
+    item.append(label, note, status);
+    list.append(item);
   }
   el('solution').hidden = false;
 }
 
-const cases = [
-  {
-    id: 'CP-1042',
-    ticket: 'The new checkout deployment has stalled. GitHub Actions finished successfully, but the new pods never became ready.',
-    scope: 'Sample client Northwind · AWS us-east-1 · EKS production/checkout-api',
-    sources: [
-      ['GitHub Actions', 'Run 1842 · commit 8c40f17 · build-and-push succeeded\nPublished checkout-api:8c40f17'],
-      ['Amazon ECR', 'checkout-api:8c40f17 · image present\ncheckout-api:release-1842 · ImageNotFoundException'],
-      ['Amazon EKS', 'Deployment image checkout-api:release-1842\nPod event · manifest unknown\nPod status · ImagePullBackOff']
-    ],
-    action: 'tag',
-    finding: 'The rollout references release-1842, which is absent from ECR. The pipeline published 8c40f17. Verify that this is the intended release artifact, then review a deployment update to use its immutable digest.',
-    draft: 'Hi, we traced the stalled checkout rollout to an image reference that does not match the published release artifact. We’re reviewing the intended image before updating the deployment. We’ll confirm rollout health and share another update once verification is complete.'
-  },
-  {
-    id: 'CP-1079',
-    ticket: 'The billing release failed in GitHub Actions. The team reports that the previous deployment is still running.',
-    scope: 'Sample client Alder · AWS us-east-1 · EKS production/billing-api',
-    sources: [
-      ['GitHub Actions', 'Run 1851 · commit 41f93ae\nConfigure AWS credentials · AccessDenied for AssumeRoleWithWebIdentity\nOIDC subject · repo:alder/billing-api:ref:refs/heads/main'],
-      ['Amazon ECR / IAM', 'billing-api:41f93ae · absent\nRelease role trust · repo:alder/legacy-billing:ref:refs/heads/main\nBuild-and-push step · skipped'],
-      ['Amazon EKS', 'Deployment image billing-api:3c915d2\nExisting replicas · 3/3 ready\nNo new rollout observed']
-    ],
-    action: 'role',
-    finding: 'The AWS role trusts the old repository, so the workflow could not authenticate. The image was never published and EKS stayed on the previous deployment. Review the approved repository and branch, then correct the scoped trust and rerun the workflow.',
-    draft: 'Hi, the new billing release stopped during pipeline authentication before it reached the cluster. The previous release remains active, and its replicas are reporting ready. We’re reviewing the deployment identity configuration and will verify the rollout after the pipeline is rerun.'
-  },
-  {
-    id: 'CP-1091',
-    ticket: 'The Oracle database host stopped responding during an OpenSCAP STIG scan. The EC2 status check failed and no scan report came back.',
-    scope: 'PatchPilot · historical AWS lab case · source: project README excerpt',
-    sources: [
-      ['EC2 status check', 'README records an instance status check failure during the scan. Original telemetry is unavailable.'],
-      ['OpenSCAP', 'No scan report returned. Compliance status: unknown.'],
-      ['Database host', 'The README attributes the freeze to memory pressure while Oracle and the scan shared a 4 GB host with no swap.']
-    ],
-    action: 'patchpilot',
-    finding: 'Record the scan as No result. The historical write-up points to memory pressure. For a new incident, correlate the failed status check with the scan and verify memory and swap before changing host sizing.',
-    draft: 'Hi, the database host became unreachable during the compliance scan, and the scan did not return a report. We’re reviewing the host health checks and investigating memory pressure. We’ll verify database health before rerunning the scan and share the result once available.'
-  },
-  {
-    id: 'CP-1102',
-    ticket: 'Customer records are missing after an accidental DELETE. The API is still responding. How do we restore and verify the data?',
-    scope: 'Historical AWS SaaS SRE lab · DR Drill 002 · RDS PostgreSQL',
-    sources: [
-      ['Grafana / API', 'Availability remained 100% while 166,721 customer records were missing.'],
-      ['S3 backups', 'The first dump after deletion was 16.7% smaller. The archive was valid but contained incomplete data.'],
-      ['RDS recovery', 'Lab restored to one second before the DELETE committed. Recovery took 15 min 52 s and recovered all pre-incident data. 2,372 later inserts were reconciled and 101 updates were lost.']
-    ],
-    action: 'recovery',
-    finding: 'This is a data integrity incident. Confirm the deletion time, restore to a separate RDS instance just before the transaction, and validate and reconcile data before changing the application endpoint.',
-    draft: 'We confirmed that customer records are missing even though the API is responding. We’re preparing a point-in-time restore to a separate database and will verify the recovered records and reconcile subsequent changes before switching traffic. We’ll share the recovery result and any remaining data impact.'
-  }
-];
-
-const el = id => document.getElementById(id);
-let trial;
-
 function start() {
   const mode = el('mode').value;
-  const sample = cases[Number(el('sample').value)];
-  trial = {mode, sample};
-  el('ticket').textContent = sample.id + ' · ' + sample.ticket;
-  el('scope').textContent = sample.scope;
+  const caseData = cases[Number(el('sample').value)];
+  trial = {mode, caseData, wrongLabels: [], startedAt: Date.now()};
+
+  el('ticket').textContent = caseData.id + ' · ' + caseData.ticket;
+  el('scope').textContent = caseData.scope;
+  el('source').hidden = !caseData.source;
+  if (caseData.source) {
+    const link = document.createElement('a');
+    link.href = caseData.source.url;
+    link.textContent = caseData.source.label;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    el('source').replaceChildren('Source: ', link);
+  }
+
   el('workspace').hidden = false;
-  el('draft-box').hidden = true;
-  el('solution').hidden = true;
-  el('feedback').textContent = el('copy-status').textContent = '';
-  el('action').value = '';
+  el('draft-box').hidden = el('report-box').hidden = el('solution').hidden = true;
+  el('feedback').textContent = el('copy-status').textContent = el('report-status').textContent = '';
+  el('feedback').className = '';
+
+  const placeholder = new Option('Choose the action supported by the records', '');
+  el('action').replaceChildren(placeholder, ...caseData.options.map(o => new Option(o.label, o.value)));
   el('action').disabled = el('submit').disabled = false;
   el('start').disabled = el('sample').disabled = el('mode').disabled = true;
   el('cancel').disabled = false;
-  el('sources').replaceChildren();
-  for (const [name, record] of sample.sources) {
+
+  el('sources').replaceChildren(...caseData.sources.map(([name, record]) => {
     const card = document.createElement('article');
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     const code = document.createElement('code');
     summary.textContent = name;
     code.textContent = record;
-    details.open = mode === 'assisted';
+    details.open = mode === 'guided';
     details.append(summary, code);
     card.append(details);
-    el('sources').append(card);
-  }
+    return card;
+  }));
+
   el('finding').hidden = mode === 'manual';
-  el('finding').textContent = mode === 'assisted' ? sample.finding : '';
-  if (mode === 'assisted') renderRunbook(sample);
+  el('finding').textContent = caseData.finding;
+  if (mode === 'guided') renderRunbook(caseData);
+  el('ticket-heading').focus();
 }
 
 function stop() {
@@ -174,82 +191,126 @@ el('cancel').onclick = () => {
   el('workspace').hidden = true;
   el('ticket').textContent = 'Investigation closed. Open a sample ticket to continue.';
   el('scope').textContent = '';
+  el('source').hidden = true;
 };
+
 el('action-form').onsubmit = event => {
   event.preventDefault();
   if (!trial) return;
-  if (el('action').value !== trial.sample.action) {
-    el('feedback').textContent = 'That action is unsupported by the evidence. Review the records and try again.';
+  const choice = trial.caseData.options.find(o => o.value === el('action').value);
+  if (!choice) return;
+  if (choice.value !== trial.caseData.action) {
+    if (!trial.wrongLabels.includes(choice.label)) trial.wrongLabels.push(choice.label);
+    el('feedback').className = 'feedback-wrong';
+    el('feedback').textContent = 'Not supported by the evidence. ' + choice.hint;
     return;
   }
-  const {mode, sample} = trial;
+
+  lastRun = {...trial, solvedAt: Date.now()};
   stop();
-  el('feedback').textContent = 'Correct action selected.';
-  if (mode === 'manual') renderRunbook(sample);
-  if (mode === 'assisted') {
-    el('draft').value = sample.draft;
-    el('draft-box').hidden = false;
-  }
+  recordSolve(lastRun);
+  renderProgress();
+
+  const {caseData, mode} = lastRun;
+  el('feedback').className = 'feedback-right';
+  el('feedback').textContent = 'Correct action selected.' + (mode === 'manual' ? ' The finding and runbook are now shown.' : '');
+  el('finding').hidden = false;
+  if (mode === 'manual') renderRunbook(caseData);
+  el('draft').value = caseData.draft;
+  el('draft-box').hidden = el('report-box').hidden = false;
+  if (mode === 'manual') el('solution-heading').focus();
 };
-el('copy').onclick = async () => {
+
+// ---------- copy and report ----------
+
+async function copyText(text, statusId, fallbackMessage) {
   try {
-    await navigator.clipboard.writeText(el('draft').value);
-    el('copy-status').textContent = 'Draft copied.';
+    await navigator.clipboard.writeText(text);
+    el(statusId).textContent = 'Copied.';
+    return true;
   } catch {
-    el('draft').select();
-    el('copy-status').textContent = 'Draft selected. Copy it using your keyboard.';
+    el(statusId).textContent = fallbackMessage;
+    return false;
   }
+}
+
+el('copy').onclick = async () => {
+  if (!await copyText(el('draft').value, 'copy-status', 'Draft selected. Copy it using your keyboard.')) el('draft').select();
 };
 
-const slaExamples = [
-  {sample: 2, title: 'PatchPilot host freeze', priority: 3, owner: 'Linux operations', paused: true, target: 'Resolution', next: 'Check for the requested host metrics at the next shift handoff.'},
-  {sample: 0, title: 'Checkout rollout stalled', priority: 3, owner: 'Unassigned', minutes: 8, expectedMinutes: 10, target: 'First response', next: 'Assign an owner and acknowledge the ticket.'},
-  {sample: 1, title: 'Billing pipeline failed', priority: 2, owner: 'Release engineering', minutes: 25, expectedMinutes: 35, target: 'Resolution', next: 'Review the release role and escalate if the fix will miss the deadline.'},
-  {sample: 3, title: 'RDS customer records missing', priority: 1, owner: 'Incident lead', major: true, minutes: 45, expectedMinutes: 30, target: 'Resolution', next: 'Escalate immediately and coordinate database recovery.'}
-];
-
-function slaRank(ticket) {
-  if (ticket.major) return 0;
-  if (ticket.paused) return 4;
-  if (ticket.minutes <= 0) return 1;
-  if (ticket.minutes <= ticket.expectedMinutes) return 2;
-  return 3;
+function currentReport() {
+  const notes = {};
+  for (const step of lastRun.caseData.runbook) notes[step.id] = storageGet(noteKey(lastRun.caseData.id, step.id)) || '';
+  return buildReport({...lastRun, notes, draft: el('draft').value});
 }
 
-function slaStatus(ticket) {
-  if (ticket.paused) return 'Paused · awaiting customer evidence';
-  if (ticket.minutes <= 0) return 'Breached';
-  const remaining = ticket.minutes + ' min left';
-  if (ticket.major) return 'Major incident · ' + remaining;
-  return ticket.minutes <= ticket.expectedMinutes ? 'At risk · ' + remaining : remaining;
-}
+el('copy-report').onclick = () => {
+  if (lastRun) copyText(currentReport(), 'report-status', 'Clipboard unavailable. Use Download instead.');
+};
 
-const slaQueue = [...slaExamples].sort((a, b) =>
-  slaRank(a) - slaRank(b) ||
-  (slaRank(a) === 3 ? a.priority - b.priority : 0) ||
-  (a.minutes ?? Infinity) - (b.minutes ?? Infinity) ||
-  a.priority - b.priority
-);
+el('download-report').onclick = () => {
+  if (!lastRun) return;
+  const url = URL.createObjectURL(new Blob([currentReport()], {type: 'text/markdown'}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = lastRun.caseData.id + '-incident-report.md';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  el('report-status').textContent = 'Report downloaded.';
+};
 
-for (const ticket of slaQueue) {
-  const row = el('sla-rows').insertRow();
+// ---------- live SLA queue ----------
+
+const clock = {base: 0, since: Date.now(), speed: 1};
+const elapsedMinutes = () => clock.base + (Date.now() - clock.since) / 60000 * clock.speed;
+
+el('sla-speed').onchange = () => {
+  clock.base = elapsedMinutes();
+  clock.since = Date.now();
+  clock.speed = Number(el('sla-speed').value);
+  renderQueue();
+};
+
+const slaTickets = cases.map((c, index) => ({...c.sla, id: c.id, title: c.title, index}));
+const slaRows = new Map();
+
+for (const ticket of slaTickets) {
+  const row = document.createElement('tr');
   const open = document.createElement('button');
   open.type = 'button';
-  open.textContent = cases[ticket.sample].id + ' · ' + ticket.title;
+  open.textContent = ticket.id + ' · ' + ticket.title;
   open.onclick = () => {
     if (trial) el('cancel').click();
-    el('sample').value = String(ticket.sample);
-    el('mode').value = 'assisted';
+    el('sample').value = String(ticket.index);
     start();
-    el('ticket').scrollIntoView({block: 'center'});
   };
-  row.insertCell().append(open);
-  row.insertCell().textContent = 'P' + ticket.priority + ' · ' + ticket.owner;
-  const target = row.insertCell();
-  target.textContent = ticket.target;
+  const target = document.createElement('td');
   const status = document.createElement('small');
-  status.textContent = slaStatus(ticket);
-  if (slaRank(ticket) <= 2) status.className = 'sla-urgent';
-  target.append(status);
-  row.insertCell().textContent = ticket.next;
+  target.append(ticket.target, status);
+  const cells = [document.createElement('td'), document.createElement('td'), target, document.createElement('td')];
+  cells[0].append(open);
+  cells[1].textContent = 'P' + ticket.priority + ' · ' + ticket.owner;
+  cells[3].textContent = ticket.next;
+  row.append(...cells);
+  slaRows.set(ticket.id, {row, status});
 }
+
+function renderQueue() {
+  const body = el('sla-rows');
+  const queue = rankQueue(slaTickets, elapsedMinutes());
+  queue.forEach((ticket, position) => {
+    const {row, status} = slaRows.get(ticket.id);
+    const rank = slaRank(ticket);
+    status.textContent = slaStatus(ticket);
+    status.className = !ticket.paused && ticket.remaining <= 0 ? 'sla-breached' : rank <= RANK.atRisk ? 'sla-urgent' : '';
+    // Only move rows when the order changes, so keyboard focus isn't disturbed every tick.
+    if (body.children[position] !== row) body.insertBefore(row, body.children[position] || null);
+  });
+}
+
+// ---------- boot ----------
+
+migrateIndexedNotes();
+renderProgress();
+renderQueue();
+setInterval(renderQueue, 1000);

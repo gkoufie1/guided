@@ -1,0 +1,8 @@
+{
+  "name": "guided",
+  "private": true,
+  "description": "Browser-based cloud operations incident triage trainer",
+  "scripts": {
+    "test": "node --test"
+  }
+}
