@@ -13,15 +13,30 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npm test
+      - name: Trainer and runbook export tests
+        run: npm test
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Backend unit tests
+        run: python3 -m unittest discover -s backend/tests -v
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform format and validate
+        working-directory: backend/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
 
   deploy:
     if: github.event_name != 'pull_request'
-    needs: test
+    needs: [test, backend]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,7 +49,7 @@ jobs:
       group: pages
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

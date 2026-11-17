@@ -3,6 +3,8 @@
   "private": true,
   "description": "Browser-based cloud operations incident triage trainer",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:backend": "python -m unittest discover -s backend/tests -v",
+    "export-runbooks": "node scripts/export-runbooks.js"
   }
 }

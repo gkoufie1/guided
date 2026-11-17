@@ -1,5 +1,6 @@
 // Sample incidents. Each case owns its evidence, answer options (with a hint for
-// every wrong option), runbook, reply draft, and SLA queue entry.
+// every wrong option), runbook, reply draft, and SLA queue entry. `signals` are
+// lowercase phrases the backend matches against incoming ticket text.
 // To add a case, append an object with the same shape; tests/cases.test.js checks it.
 (function (root, factory) {
   const api = factory();
@@ -10,6 +11,7 @@
     {
       id: 'CP-1042',
       title: 'Checkout rollout stalled',
+      signals: ['imagepullbackoff', 'errimagepull', 'manifest unknown', 'imagenotfoundexception', 'failed to pull image', 'image not found', 'never became ready', 'rollout stalled', 'deployment has stalled'],
       ticket: 'The new checkout deployment has stalled. GitHub Actions finished successfully, but the new pods never became ready.',
       scope: 'Sample client Northwind · AWS us-east-1 · EKS production/checkout-api',
       sources: [
@@ -37,6 +39,7 @@
     {
       id: 'CP-1079',
       title: 'Billing pipeline failed',
+      signals: ['assumerolewithwebidentity', 'configure aws credentials', 'not authorized to perform: sts', 'oidc', 'trust policy', 'could not assume role', 'github actions', 'pipeline failed', 'accessdenied'],
       ticket: 'The billing release failed in GitHub Actions. The team reports that the previous deployment is still running.',
       scope: 'Sample client Alder · AWS us-east-1 · EKS production/billing-api',
       sources: [
@@ -64,6 +67,7 @@
     {
       id: 'CP-1091',
       title: 'PatchPilot host freeze',
+      signals: ['status check failed', 'status check failure', 'stopped responding', 'unresponsive', 'froze', 'openscap', 'stig', 'out of memory', 'oom', 'swap'],
       ticket: 'The Oracle database host stopped responding during an OpenSCAP STIG scan. The EC2 status check failed and no scan report came back.',
       scope: 'PatchPilot · historical AWS lab case · source: project README excerpt',
       source: {label: 'PatchPilot on GitHub', url: 'https://github.com/gkoufie1/patchpilot'},
@@ -92,6 +96,7 @@
     {
       id: 'CP-1102',
       title: 'RDS customer records missing',
+      signals: ['records missing', 'records are missing', 'accidental delete', 'accidentally deleted', 'rows deleted', 'point-in-time', 'point in time restore', 'pitr', 'data loss', 'missing data'],
       ticket: 'Customer records are missing after an accidental DELETE. The API is still responding. How do we restore and verify the data?',
       scope: 'Historical AWS SaaS SRE lab · DR Drill 002 · RDS PostgreSQL',
       source: {label: 'DR Drill 002 write-up', url: 'https://github.com/gkoufie1/aws-saas-sre-disaster-recovery-lab/blob/main/docs/dr/dr-drill-002-rds-pitr-results.md'},
@@ -120,6 +125,7 @@
     {
       id: 'CP-1110',
       title: 'Portal certificate expired',
+      signals: ['certificate has expired', 'certificate expired', 'expired certificate', 'not private', 'err_cert_date_invalid', 'ssl certificate', 'tls certificate', 'certificate warning', 'acm'],
       ticket: 'Since midnight UTC, customers get a “connection is not private” warning on the customer portal. Nothing was deployed overnight.',
       scope: 'Sample client Bramble · AWS us-east-1 · ALB portal-prod → ECS portal-web',
       sources: [
@@ -147,6 +153,7 @@
     {
       id: 'CP-1117',
       title: 'Terraform state locked',
+      signals: ['error acquiring the state lock', 'state lock', 'force-unlock', 'conditionalcheckfailedexception', 'lock info', 'terraform plan', 'terraform apply', 'dynamodb lock'],
       ticket: 'Our network change pipeline has failed twice with “Error acquiring the state lock”. Nobody on the team is running Terraform right now.',
       scope: 'Sample client Alder · GitHub Actions → Terraform · S3 backend with DynamoDB locking',
       sources: [
@@ -174,6 +181,7 @@
     {
       id: 'CP-1123',
       title: 'Orders API database timeouts',
+      signals: ['etimedout', 'connection timeouts', 'connection timed out', 'timed out connecting', 'could not connect to server', 'security group', 'flow logs', 'reject', '5432', '3306'],
       ticket: 'After yesterday’s network change, the orders service returns 500 errors. Application logs show database connection timeouts.',
       scope: 'Sample client Northwind · AWS us-east-1 · ECS orders-api → RDS PostgreSQL orders-db',
       sources: [

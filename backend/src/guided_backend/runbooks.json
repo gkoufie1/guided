@@ -1,0 +1,355 @@
+[
+  {
+    "id": "CP-1042",
+    "title": "Checkout rollout stalled",
+    "signals": [
+      "imagepullbackoff",
+      "errimagepull",
+      "manifest unknown",
+      "imagenotfoundexception",
+      "failed to pull image",
+      "image not found",
+      "never became ready",
+      "rollout stalled",
+      "deployment has stalled"
+    ],
+    "finding": "The rollout references release-1842, which is absent from ECR. The pipeline published 8c40f17. Verify that this is the intended release artifact, then review a deployment update to use its immutable digest.",
+    "action": "Align the deployment image reference with the verified ECR artifact and review the rollout",
+    "ruled_out": [
+      {
+        "label": "Review readiness probe configuration and service health",
+        "hint": "Readiness probes only run once a container starts. These pods are in ImagePullBackOff, so the image was never pulled."
+      },
+      {
+        "label": "Correct the GitHub Actions role trust and rerun the workflow",
+        "hint": "The workflow authenticated and published checkout-api:8c40f17, so the pipeline identity is working."
+      },
+      {
+        "label": "Wait for the rollout to recover on its own",
+        "hint": "ImagePullBackOff will not clear by itself. The tag release-1842 does not exist in ECR, so every retry fails the same way."
+      }
+    ],
+    "steps": [
+      {
+        "where": "GitHub → Actions → Run 1842",
+        "do": "Open the build-and-push step. Confirm commit 8c40f17 and the published tag checkout-api:8c40f17."
+      },
+      {
+        "where": "AWS Console → Amazon ECR → Repositories → checkout-api",
+        "do": "In us-east-1, find tag 8c40f17 and copy its image digest. Confirm the artifact belongs to the intended release and that release-1842 is absent."
+      },
+      {
+        "where": "GitHub → deployment configuration for production/checkout-api",
+        "do": "Find the image field for the checkout-api container in the manifest or Helm values that your pipeline actually deploys. Replace the existing registry/repository:release-1842 with the same registry/repository@sha256:<digest copied from ECR>. Open a pull request and deploy through the normal release workflow. The sample does not specify a file path or digest."
+      },
+      {
+        "where": "EKS → production namespace → checkout-api deployment",
+        "do": "From the intended cluster context, run the command below. Confirm the new pods are Ready, use the expected image digest, and pass the checkout smoke test before updating the customer.",
+        "code": "kubectl -n production rollout status deployment/checkout-api --timeout=5m"
+      }
+    ]
+  },
+  {
+    "id": "CP-1079",
+    "title": "Billing pipeline failed",
+    "signals": [
+      "assumerolewithwebidentity",
+      "configure aws credentials",
+      "not authorized to perform: sts",
+      "oidc",
+      "trust policy",
+      "could not assume role",
+      "github actions",
+      "pipeline failed",
+      "accessdenied"
+    ],
+    "finding": "The AWS role trusts the old repository, so the workflow could not authenticate. The image was never published and EKS stayed on the previous deployment. Review the approved repository and branch, then correct the scoped trust and rerun the workflow.",
+    "action": "Correct the GitHub Actions role trust for the approved repository and rerun the workflow",
+    "ruled_out": [
+      {
+        "label": "Attach AdministratorAccess to the release role and rerun",
+        "hint": "AssumeRoleWithWebIdentity failed, so the trust policy rejected the caller before any permissions policy was evaluated. Broader permissions would not help and would widen the blast radius."
+      },
+      {
+        "label": "Point the deployment at billing-api:41f93ae in ECR",
+        "hint": "billing-api:41f93ae was never built. The build-and-push step was skipped after authentication failed."
+      },
+      {
+        "label": "Rerun the workflow without changes",
+        "hint": "The trust policy still names repo:alder/legacy-billing, so a rerun fails with the same AccessDenied."
+      }
+    ],
+    "steps": [
+      {
+        "where": "GitHub → Actions → Run 1851",
+        "do": "Open Configure AWS credentials. Confirm the role configured for the release, the AccessDenied message, and the workflow subject repo:alder/billing-api:ref:refs/heads/main."
+      },
+      {
+        "where": "AWS Console → IAM → Roles → release role → Trust relationships",
+        "do": "After confirming that the new repository is authorized, update the GitHub OIDC subject in the matching trust statement. Preserve the other conditions and review the change in infrastructure code if it manages this role.",
+        "code": "Before: repo:alder/legacy-billing:ref:refs/heads/main\nAfter:  repo:alder/billing-api:ref:refs/heads/main"
+      },
+      {
+        "where": "GitHub → Actions → Run 1851 → Re-run jobs",
+        "do": "After the approved trust change is applied, rerun the failed workflow. Confirm the credentials step succeeds and the billing-api:41f93ae image appears in ECR."
+      },
+      {
+        "where": "EKS → production namespace → billing-api deployment",
+        "do": "Confirm the new release rolled out and the application passes its smoke test before updating the customer.",
+        "code": "kubectl -n production rollout status deployment/billing-api --timeout=5m"
+      }
+    ]
+  },
+  {
+    "id": "CP-1091",
+    "title": "PatchPilot host freeze",
+    "signals": [
+      "status check failed",
+      "status check failure",
+      "stopped responding",
+      "unresponsive",
+      "froze",
+      "openscap",
+      "stig",
+      "out of memory",
+      "oom",
+      "swap"
+    ],
+    "finding": "Record the scan as No result. The historical write-up points to memory pressure. For a new incident, correlate the failed status check with the scan and verify memory and swap before changing host sizing.",
+    "action": "Record the scan as No result and investigate host health",
+    "ruled_out": [
+      {
+        "label": "Mark the host compliant because the previous scan passed",
+        "hint": "No report means No result. A previous pass says nothing about the host’s current state."
+      },
+      {
+        "label": "Reboot the host and immediately rerun the scan",
+        "hint": "That reproduces the same conditions without understanding them. Check memory and swap first or the host may freeze again."
+      },
+      {
+        "label": "Exclude this host from STIG scanning",
+        "hint": "That removes compliance coverage instead of fixing the cause."
+      }
+    ],
+    "steps": [
+      {
+        "where": "OpenSCAP → scan results",
+        "do": "Record the missing report as No result. Keep the incident open until the scan returns a report."
+      },
+      {
+        "where": "AWS Console → EC2 → Instances → database host → Status checks",
+        "do": "Compare the first failed check with the scan start time. After the host is reachable, check available memory and swap, and review any retained host metrics for pressure at the time of the incident.",
+        "code": "free -h\nswapon --show"
+      },
+      {
+        "where": "PatchPilot → database host configuration and scan scheduling",
+        "do": "If evidence supports memory pressure, review sizing, swap, and scan priority. The lab moved from 4 GB to 8 GB, added swap, and lowered scan CPU and I/O priority. Size other hosts for their workload."
+      },
+      {
+        "where": "Oracle health checks and OpenSCAP → verification",
+        "do": "During an approved maintenance window, rerun the scan. Confirm the host stays reachable, Oracle remains healthy, and the scan produces a report."
+      }
+    ]
+  },
+  {
+    "id": "CP-1102",
+    "title": "RDS customer records missing",
+    "signals": [
+      "records missing",
+      "records are missing",
+      "accidental delete",
+      "accidentally deleted",
+      "rows deleted",
+      "point-in-time",
+      "point in time restore",
+      "pitr",
+      "data loss",
+      "missing data"
+    ],
+    "finding": "This is a data integrity incident. Confirm the deletion time, restore to a separate RDS instance just before the transaction, and validate and reconcile data before changing the application endpoint.",
+    "action": "Confirm the deletion time and plan a point-in-time restore to a new RDS instance",
+    "ruled_out": [
+      {
+        "label": "Restore the latest S3 dump over the production database",
+        "hint": "The latest dump was taken after the deletion (16.7% smaller), and overwriting production destroys evidence and later legitimate writes."
+      },
+      {
+        "label": "No action needed: API availability is 100%",
+        "hint": "Availability is not integrity. The API is serving incomplete data."
+      },
+      {
+        "label": "Restore to the latest restorable time",
+        "hint": "The latest restorable time is after the DELETE committed, so the restored copy would be missing the same records."
+      }
+    ],
+    "steps": [
+      {
+        "where": "Incident timeline → confirm the deletion",
+        "do": "Confirm known customer IDs are missing and establish the DELETE commit time in UTC from available evidence. In the lab, the API stayed available while records were missing. Preserve the original database and coordinate write handling before cutover."
+      },
+      {
+        "where": "AWS Console → RDS → Databases → source DB → Actions → Restore to point in time",
+        "do": "Choose a recoverable UTC time before the bad transaction and restore to a new instance. The lab chose one second before the DELETE committed. Check the recovery window and use the verified timestamp for this incident."
+      },
+      {
+        "where": "Restored database → validate and reconcile",
+        "do": "Check known missing IDs, expected counts, and application reads. Compare legitimate writes made after the restore point and reconcile recoverable changes before cutover. Document any unrecovered data."
+      },
+      {
+        "where": "Application configuration → cut over and verify",
+        "do": "Coordinate a write freeze and point the application to the validated instance through the approved release process. Verify reads and writes, retain the original instance for investigation, and record recovery duration and remaining data loss."
+      }
+    ]
+  },
+  {
+    "id": "CP-1110",
+    "title": "Portal certificate expired",
+    "signals": [
+      "certificate has expired",
+      "certificate expired",
+      "expired certificate",
+      "not private",
+      "err_cert_date_invalid",
+      "ssl certificate",
+      "tls certificate",
+      "certificate warning",
+      "acm"
+    ],
+    "finding": "The listener still presents an imported certificate that expired at midnight. ACM does not renew imported certificates. A valid Amazon-issued certificate for the same name exists but is not in use. Attach it to the listener, then retire the imported one.",
+    "action": "Attach the issued ACM certificate to the ALB HTTPS listener",
+    "ruled_out": [
+      {
+        "label": "Restart the portal-web ECS service",
+        "hint": "TLS terminates at the ALB, and its targets are healthy. Restarting tasks will not change the certificate the listener presents."
+      },
+      {
+        "label": "Request a new certificate and wait for validation",
+        "hint": "ACM already holds an issued, DNS-validated certificate for this name. It just isn’t attached to the listener."
+      },
+      {
+        "label": "Serve the portal over HTTP until a certificate is ready",
+        "hint": "That removes encryption for customer traffic and does not fix the listener."
+      }
+    ],
+    "steps": [
+      {
+        "where": "AWS Console → Certificate Manager → Certificates (us-east-1)",
+        "do": "Open the Amazon-issued certificate for portal.bramble.example. Confirm the status is Issued, the domain names cover the portal hostname, and it is in the same Region as the load balancer."
+      },
+      {
+        "where": "AWS Console → EC2 → Load Balancers → portal-prod → Listeners → HTTPS:443 → Edit",
+        "do": "Change the default SSL/TLS certificate to the issued ACM certificate and save. If the listener is managed in Terraform or CloudFormation, make the change there instead so the next apply does not revert it."
+      },
+      {
+        "where": "Terminal → confirm the certificate being served",
+        "do": "Check the subject and expiry date the portal now presents, then load the portal in a browser.",
+        "code": "openssl s_client -connect portal.bramble.example:443 -servername portal.bramble.example </dev/null 2>/dev/null | openssl x509 -noout -subject -enddate"
+      },
+      {
+        "where": "CloudWatch → Alarms → AWS/CertificateManager DaysToExpiry",
+        "do": "Remove the expired imported certificate once nothing references it, and add a DaysToExpiry alarm (for example, below 30 days) for any certificate that ACM does not renew automatically."
+      }
+    ]
+  },
+  {
+    "id": "CP-1117",
+    "title": "Terraform state locked",
+    "signals": [
+      "error acquiring the state lock",
+      "state lock",
+      "force-unlock",
+      "conditionalcheckfailedexception",
+      "lock info",
+      "terraform plan",
+      "terraform apply",
+      "dynamodb lock"
+    ],
+    "finding": "Run 2198 was cancelled mid-apply and left a stale lock (ID 3f6b2c1e…). After confirming nothing else is applying, release that specific lock, then review the plan for changes the interrupted apply may have partly made.",
+    "action": "Confirm no run holds the lock, then force-unlock with the recorded lock ID and review the plan",
+    "ruled_out": [
+      {
+        "label": "Rerun the pipeline with -lock=false",
+        "hint": "That disables state protection for every run and risks concurrent writes corrupting state."
+      },
+      {
+        "label": "Delete the DynamoDB lock table",
+        "hint": "That removes locking for every workspace that shares the table. Only one stale item needs to go."
+      },
+      {
+        "label": "Wait for the lock to time out",
+        "hint": "Terraform state locks do not expire. The lock stays until it is released or force-unlocked."
+      }
+    ],
+    "steps": [
+      {
+        "where": "GitHub → Actions → workflows that apply network/prod",
+        "do": "Confirm no run is in progress or queued for this workspace and that the lock ID in Run 2203 matches the cancelled Run 2198. Do not unlock while any apply could still be writing state."
+      },
+      {
+        "where": "Terminal → network/prod working directory with the same backend configuration",
+        "do": "Release only the recorded lock.",
+        "code": "terraform init\nterraform force-unlock 3f6b2c1e-9a4d-4e8b-b1f2-6c0d7e5a9b14"
+      },
+      {
+        "where": "GitHub → Actions → rerun the network pipeline",
+        "do": "Review the plan carefully. The cancelled apply may have created or changed some resources, so expect differences beyond the original change and confirm each one before applying."
+      },
+      {
+        "where": "GitHub → workflow file for the network pipeline",
+        "do": "Add a concurrency group so a new push queues behind a running apply instead of cancelling it.",
+        "code": "concurrency:\n  group: terraform-network-prod\n  cancel-in-progress: false"
+      }
+    ]
+  },
+  {
+    "id": "CP-1123",
+    "title": "Orders API database timeouts",
+    "signals": [
+      "etimedout",
+      "connection timeouts",
+      "connection timed out",
+      "timed out connecting",
+      "could not connect to server",
+      "security group",
+      "flow logs",
+      "reject",
+      "5432",
+      "3306"
+    ],
+    "finding": "PR #418 moved the orders tasks to a new security group, but the RDS inbound rule still references the retired one. Flow logs confirm the traffic is rejected. Update the RDS rule to allow 5432 from sg-0b27e9 through the same Terraform change process.",
+    "action": "Allow PostgreSQL from the new app security group on the RDS security group",
+    "ruled_out": [
+      {
+        "label": "Rotate the database password",
+        "hint": "An authentication problem would return an error from PostgreSQL. These are timeouts and the flow logs show REJECT, so packets never reach the database."
+      },
+      {
+        "label": "Open port 5432 to 0.0.0.0/0 on the RDS security group",
+        "hint": "That exposes the database to every address that can route to it. Reference the app security group instead."
+      },
+      {
+        "label": "Scale up the RDS instance",
+        "hint": "CPU is 7% and connections dropped to zero. The database is idle because traffic is being blocked, not overloaded."
+      }
+    ],
+    "steps": [
+      {
+        "where": "AWS Console → VPC → Security groups → sg-rds-orders → Inbound rules",
+        "do": "Confirm the only 5432 rule references sg-0a14c3 and that the running orders-api tasks use sg-0b27e9."
+      },
+      {
+        "where": "GitHub → network Terraform → RDS security group rule",
+        "do": "Update the source security group of the PostgreSQL rule and open a pull request. Apply through the normal pipeline.",
+        "code": "Before: source_security_group_id = aws_security_group.orders_app.id      # sg-0a14c3\nAfter:  source_security_group_id = aws_security_group.orders_app_v2.id   # sg-0b27e9"
+      },
+      {
+        "where": "CloudWatch → orders-api 5xx rate and RDS DatabaseConnections",
+        "do": "Confirm connections recover, the 5xx rate returns to baseline, and new flow log records for port 5432 show ACCEPT."
+      },
+      {
+        "where": "GitHub → PR #418 follow-up",
+        "do": "Reference security groups by Terraform resource rather than hard-coded IDs, and add a post-deploy check that the orders service can reach its database."
+      }
+    ]
+  }
+]

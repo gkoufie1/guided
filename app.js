@@ -310,7 +310,19 @@ function renderQueue() {
 
 // ---------- boot ----------
 
+// ?case=CP-1110 opens that case in guided mode. Suggestion notes posted by the
+// backend link here so an engineer lands on the matching runbook.
+function openFromLink() {
+  const id = new URLSearchParams(location.search).get('case');
+  const index = cases.findIndex(c => c.id === id);
+  if (index === -1) return;
+  el('sample').value = String(index);
+  el('mode').value = 'guided';
+  start();
+}
+
 migrateIndexedNotes();
 renderProgress();
+openFromLink();
 renderQueue();
 setInterval(renderQueue, 1000);
