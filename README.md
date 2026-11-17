@@ -4,7 +4,7 @@ A browser-based trainer for triaging cloud operations incidents. Work a live SLA
 
 **Live demo:** https://gkoufie1.github.io/guided/
 
-![SLA queue counting down, with a breached ticket and several at-risk tickets](docs/queue.png)
+![Guided dashboard: a live SLA queue ranking tickets by major incident and at-risk deadlines, each counting down in real time](docs/queue.png)
 
 ![Investigating database timeouts: evidence cards and feedback explaining why rotating the password is wrong](docs/investigation.png)
 
